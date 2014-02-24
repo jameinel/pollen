@@ -22,13 +22,14 @@ package main
 
 import (
 	"crypto/sha512"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"io"
-	"log/syslog"
+//	"log/syslog"
 	"net/http"
 	"os"
-	"time"
+	_ "time"
 )
 
 var (
@@ -38,11 +39,36 @@ var (
 	size      = flag.Int("bytes", 64, "The size in bytes to transmit and receive each time")
 	cert      = flag.String("cert", "/etc/pollen/cert.pem", "The full path to cert.pem")
 	key       = flag.String("key", "/etc/pollen/key.pem", "The full path to key.pem")
-	log *syslog.Writer
-	dev *os.File
 )
 
-func handler(w http.ResponseWriter, r *http.Request) {
+type sysLogger interface {
+	Err(string) error
+	Info(string) error
+	Critical(string) error
+	Emerg(string) error
+	Close()	error
+}
+
+type Pollen struct {
+	dev io.ReadWriteCloser
+	log sysLogger
+	//log *syslog.Writer
+}
+
+type nilWriteCloser struct {
+	io.Reader
+}
+
+func (n nilWriteCloser) Write(b []byte) (int, error) {
+	return len(b), nil
+}
+
+func (n nilWriteCloser) Close() error {
+	return nil
+}
+
+
+func (p *Pollen) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	challenge := r.FormValue("challenge")
 	if challenge == "" {
 		http.Error(w, "Please use the pollinate client.  'sudo apt-get install pollinate' or download from: https://bazaar.launchpad.net/~pollinate/pollinate/trunk/view/head:/pollinate", http.StatusBadRequest)
@@ -52,62 +78,71 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(checksum, challenge)
 	challengeResponse := checksum.Sum(nil)
 	var err error
-	_, err = dev.Write(challengeResponse)
+	// Stir the pot with the sha sum from the challenge. It will be whitened by the system anyway
+	_, err = p.dev.Write(challengeResponse)
 	if err != nil {
 		/* Non-fatal error, but let's log this to syslog */
-		log.Err(fmt.Sprintf("Cannot write to random device at [%v]", time.Now().UnixNano()))
+		// p.log.Err(fmt.Sprintf("Cannot write to random device at [%v]", time.Now().UnixNano()))
 	}
-	log.Info(fmt.Sprintf("Server received challenge from [%s, %s] at [%v]", r.RemoteAddr, r.UserAgent(), time.Now().UnixNano()))
+	// p.log.Info(fmt.Sprintf("Server received challenge from [%s, %s] at [%v]", r.RemoteAddr, r.UserAgent(), time.Now().UnixNano()))
 	data := make([]byte, *size)
-	_, err = io.ReadFull(dev, data)
+	_, err = io.ReadFull(p.dev, data)
 	if err != nil {
 		/* Fatal error for this connection, if we can't read from device */
-		log.Err(fmt.Sprintf("Cannot read from random device at [%v]", time.Now().UnixNano()))
+		// p.log.Err(fmt.Sprintf("Cannot read from random device at [%v]", time.Now().UnixNano()))
 		http.Error(w, "Failed to read from random device", 500)
 		return
 	}
 	checksum.Write(data[:*size])
 	/* The checksum of the bytes from /dev/urandom is simply for print-ability, when debugging */
 	seed := checksum.Sum(nil)
+	// TODO: jam 2014-02-24
+	// we should set headers in the response to indicate Content-Type, etc.
 	fmt.Fprintf(w, "%x\n%x\n", challengeResponse, seed)
-	log.Info(fmt.Sprintf("Server sent response to [%s, %s] at [%v]", r.RemoteAddr, r.UserAgent(), time.Now().UnixNano()))
-}
-
-func init() {
-	var err error
-	log, err = syslog.New(syslog.LOG_ERR, "pollen")
-	if err != nil {
-		fatalf("Cannot open syslog:", err)
-	}
-	dev, err = os.OpenFile(*device, os.O_RDWR, 0)
-	if err != nil {
-		fatalf("Cannot open device: %s\n", err)
-	}
+	// p.log.Info(fmt.Sprintf("Server sent response to [%s, %s] at [%v]", r.RemoteAddr, r.UserAgent(), time.Now().UnixNano()))
 }
 
 func main() {
 	flag.Parse()
-	defer dev.Close()
+	// log, err := syslog.New(syslog.LOG_ERR, "pollen")
+	// if err != nil {
+	// 	fatalf("Cannot open syslog:", err)
+	// }
+	// defer log.Close()
 	if *httpPort == "" && *httpsPort == "" {
 		fatal("Nothing to do if http and https are both disabled")
 	}
+	var dev io.ReadWriteCloser
+	var err error
+	dev, err = os.OpenFile(*device, os.O_RDWR, 0)
+	if err != nil {
+		dev = nilWriteCloser{Reader: rand.Reader}
+		//fatalf("Cannot open device: %s\n", err)
+	}
+	defer dev.Close()
+	p := &Pollen{dev: dev}
 	httpAddr := fmt.Sprintf(":%s", *httpPort)
-	httpsAddr := fmt.Sprintf(":%s", *httpsPort)
-	http.HandleFunc("/", handler)
-	go func() {
+	//httpsAddr := fmt.Sprintf(":%s", *httpsPort)
+	http.Handle("/", p)
+	// TODO: jam 2014-02-24
+	// If a user specifies httpPort = "", we should not launch the HTTP listener
+	//go func() {
 		fatal(http.ListenAndServe(httpAddr, nil))
-	}()
-	fatal(http.ListenAndServeTLS(httpsAddr, *cert, *key, nil))
+	//}()
+	//fatal(http.ListenAndServeTLS(httpsAddr, *cert, *key, nil))
 }
 
 func fatal(args ...interface{}) {
-	log.Crit(fmt.Sprint(args...))
+	//log.Crit(fmt.Sprint(args...))
 	fmt.Fprint(os.Stderr, args...)
 	os.Exit(1)
 }
 
 func fatalf(format string, args ...interface{}) {
-	log.Emerg(fmt.Sprintf(format, args...))
+	// TODO: jam 2014-02-24
+	// fatalf is called when we fail to open syslog, seems like we should
+	// be checking for a nil syslog
+	//log.Emerg(fmt.Sprintf(format, args...))
 	fmt.Fprintf(os.Stderr, format, args...)
 	os.Exit(1)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -16,14 +17,9 @@ type Suite struct {
 	t *testing.T
 }
 
-type testHandler struct{}
-
-func (h testHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	handler(w, req)
-}
-
 func NewSuite(t *testing.T) *Suite {
-	return &Suite{httptest.NewServer(testHandler{}), t}
+	dev := nilWriteCloser{Reader: rand.Reader}
+	return &Suite{httptest.NewServer(&Pollen{dev: dev}), t}
 }
 
 func (s *Suite) Assert(v bool, args ...interface{}) {
