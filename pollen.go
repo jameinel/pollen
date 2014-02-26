@@ -28,6 +28,8 @@ import (
 	"log/syslog"
 	"net/http"
 	"os"
+	"os/signal"
+	"runtime/pprof"
 	"sync"
 	"time"
 )
@@ -39,6 +41,7 @@ var (
 	size      = flag.Int("bytes", 64, "The size in bytes to read from the random device")
 	cert      = flag.String("cert", "/etc/pollen/cert.pem", "The full path to cert.pem")
 	key       = flag.String("key", "/etc/pollen/key.pem", "The full path to key.pem")
+	cpuprof = flag.String("cpuprofile", "", "write cpu profile to file")
 )
 
 // this matches the syslog.Writer functions
@@ -96,6 +99,22 @@ func main() {
 	flag.Parse()
 	if *httpPort == "" && *httpsPort == "" {
 		fatal("Nothing to do if http and https are both disabled")
+	}
+	if *cpuprof != "" {
+		f, err := os.Create(*cpuprof)
+		if err != nil {
+			fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		go func() {
+			<-c
+			fmt.Fprintf(os.Stderr, "writing %s\n", *cpuprof)
+			pprof.StopCPUProfile()
+			os.Exit(0)
+		}()
+		defer pprof.StopCPUProfile()
 	}
 	log, err := syslog.New(syslog.LOG_ERR, "pollen")
 	if err != nil {
